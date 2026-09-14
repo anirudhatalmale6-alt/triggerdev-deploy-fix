@@ -1,0 +1,13 @@
+{
+  "name": "ai-creator-platform",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@trigger.dev/sdk": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "axios": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

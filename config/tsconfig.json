@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+
+    // CHANGED from "NodeNext"/"NodeNext".
+    //
+    // Under moduleResolution "NodeNext", an ESM specifier must carry an explicit
+    // extension -- and that rule applies to path-mapped specifiers too. So
+    //     import { uploadToTigris } from "@/utils/storageClient";
+    // fails typechecking with TS2307 "Cannot find module", even though esbuild
+    // bundles it perfectly well. That mismatch between what tsc says and what
+    // the bundler does is the "path resolution" symptom.
+    //
+    // "Bundler" is the correct setting for code that is always bundled before it
+    // runs, which is exactly what Trigger.dev does to your tasks. It keeps every
+    // existing import in your task files working unchanged -- both the aliased
+    // "@/utils/..." form and the relative "../utils/..." form, with or without
+    // an extension.
+    //
+    // "module" must move to "ESNext" alongside it: TypeScript rejects
+    // moduleResolution "Bundler" while module is "NodeNext".
+    //
+    // The alternative, if you would rather keep NodeNext: leave these two as
+    // they were and append ".js" to every relative and aliased import in the
+    // task files instead. Both are verified working. This one requires no
+    // changes to your source.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    "baseUrl": ".",
+    "paths": {
+      "@/trigger/*": ["src/trigger/*"],
+      "@/utils/*": ["src/utils/*"]
+    },
+
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+
+    // Typecheck only -- Trigger.dev's own build emits the deployed artifact.
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "trigger.config.ts"]
+}
