@@ -130,6 +130,76 @@ if [ -f "trigger.config.ts" ]; then
   esac
 fi
 
+# ---------------------------------------------------------------------------
+# 6. Compiled .js sitting next to a .ts inside a trigger dir.
+#
+#    The CLI globs task files as **/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}, so a
+#    compiled sibling becomes a SECOND entry point that emits to the same
+#    <name>.mjs as the .ts. esbuild then aborts with:
+#
+#      Two output files share the same path but have different contents:
+#        .trigger/tmp/build-XXXX/src/trigger/<name>.mjs
+#
+#    Running `tsc` without --noEmit (and without an outDir) against a config
+#    that has neither is all it takes to create them.
+# ---------------------------------------------------------------------------
+collisions=""
+if [ -f "trigger.config.ts" ]; then
+  # Directories the CLI will scan: explicit dirs if present, else any dir named "trigger".
+  scan_dirs=$(grep -o 'dirs:[[:space:]]*\[[^]]*\]' trigger.config.ts 2>/dev/null \
+    | grep -o '"[^"]*"' | tr -d '"')
+  if [ -z "$scan_dirs" ]; then
+    scan_dirs=$(find . -type d -name trigger -not -path '*/node_modules/*' -not -path '*/.trigger/*' 2>/dev/null)
+  fi
+
+  for dir in $scan_dirs; do
+    [ -d "$dir" ] || continue
+    while IFS= read -r tsfile; do
+      [ -n "$tsfile" ] || continue
+      stem=${tsfile%.ts}
+      for ext in js mjs cjs jsx; do
+        if [ -f "$stem.$ext" ]; then
+          collisions="$collisions$stem.$ext (collides with $(basename "$tsfile"))
+"
+        fi
+      done
+    done <<EOF
+$(find "$dir" -name '*.ts' -not -name '*.d.ts' -not -path '*/node_modules/*' 2>/dev/null)
+EOF
+  done
+fi
+
+if [ -n "$collisions" ]; then
+  bad "compiled file(s) sitting next to a .ts inside a trigger directory"
+  printf '%s' "$collisions" | while IFS= read -r line; do [ -n "$line" ] && note "$line"; done
+  note "each of these becomes a second entry point emitting to the same .mjs,"
+  note "which fails the build with 'Two output files share the same path'"
+  note "fix: bash scripts/clean-emitted.sh --apply    (then keep noEmit: true)"
+else
+  ok "no compiled .js/.mjs/.cjs shadowing a .ts in the trigger dirs"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Make sure the build script cannot recreate them.
+# ---------------------------------------------------------------------------
+if [ -f "tsconfig.json" ]; then
+  if grep -q '"noEmit"[[:space:]]*:[[:space:]]*true' tsconfig.json || grep -q '"outDir"' tsconfig.json; then
+    ok "tsconfig sets noEmit or outDir, so tsc cannot litter .js next to .ts"
+  else
+    warn "tsconfig sets neither noEmit nor outDir — running tsc will emit .js beside every .ts"
+    note 'add  "noEmit": true  (Trigger.dev emits the deployed artifact itself)'
+  fi
+fi
+if [ -f "package.json" ]; then
+  build_script=$(node -p "try{require('./package.json').scripts?.build ?? ''}catch(e){''}" 2>/dev/null)
+  case "$build_script" in
+    "")            warn "package.json has no \"build\" script — \`npm run build\` will fail with 'Missing script: build'" ;;
+    *--noEmit*)    ok "build script is typecheck-only ($build_script)" ;;
+    *)             warn "build script \"$build_script\" may emit .js next to your .ts files"
+                   note 'prefer  "build": "tsc --noEmit"' ;;
+  esac
+fi
+
 printf '\n'
 if [ "$fail" -eq 0 ]; then
   printf '%sPreflight passed.%s\n\n' "$GRN" "$OFF"
