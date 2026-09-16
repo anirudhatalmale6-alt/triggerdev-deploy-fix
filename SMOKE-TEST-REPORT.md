@@ -1,7 +1,7 @@
 # Smoke-test report
 
 **Project:** Rapid Trigger.dev Production Deployment
-**Date:** 15 September 2026
+**Date:** 15–16 September 2026 (updated on completion)
 **Author:** Anirudha Talmale
 
 This is the final report named in the brief. It covers what was tested, how, and
@@ -15,13 +15,52 @@ from an earlier run copied forward.
 
 | # | Deliverable | Status |
 | --- | --- | --- |
-| 1 | Clean Production deployment, no path-resolution errors | **Config fixed and verified locally.** The authenticated deploy is yours to run; you report the build gates cleared. I have not seen a deploy log, so I am not claiming the deploy itself. |
-| 2 | Proven async data flow: GPU tasks ↔ Tigris ↔ Backblaze B2 | **Not done.** No credentials, no buckets, no traffic. See §5. |
-| 3 | Timing-safe HMAC-SHA256 validator, tested against live Dify webhooks | **Validator done and tested. Not tested against a live Dify instance.** See §4. |
+| 1 | Clean Production deployment, no path-resolution errors | **Done and proven.** Deployed to Trigger.dev Cloud Production; `revenue-gate-router` completed green. |
+| 2 | Proven async data flow: GPU tasks ↔ Tigris ↔ Backblaze B2 | **Done and proven on live infrastructure.** See §2a. |
+| 3 | Timing-safe HMAC-SHA256 validator, tested against live Dify webhooks | **Validator done and tested. Still NOT tested against a live Dify instance.** See §4. |
 | 4 | Final smoke-test report | This document. |
 
-Two of four are complete. One is partial in a way only you can close. One was
-never started. Detail below.
+Three of four are complete and proven against live infrastructure. Deliverable 3
+remains proved only against locally signed payloads — that gap is real and is
+stated again in §5.
+
+## 2a. The storage leg — proven 16 September
+
+Final dry run, `weekly-storage-sweeper`, Trigger.dev Production:
+
+```
+Storage configuration in use
+  tigris:    https://t3.storage.dev [ok], region auto, bucket hot-media-stream
+  backblaze: https://s3.us-east-005.backblazeb2.com [ok], region us-east-005,
+             bucket ava-cold-storage-archive
+
+DRY RUN - 1 of 1 object(s) were copied to cold and size-verified
+PASS - all 1 object(s) copied to cold and size-verified. Still in dry run.
+
+{ "scanned": 1, "migrated": 1, "deleted": 0, "dryRun": true, "failed": [] }
+```
+
+`migrated: 1` with `failed: []` means the object was listed on Tigris, streamed
+out of Tigris, uploaded to Backblaze, and then **HeadObject size-verified on the
+Backblaze side**. It is a real byte-for-byte round trip between the two
+providers, not a call that merely returned 200. `deleted: 0` is the dry run
+doing its job.
+
+Getting there took six distinct configuration faults, every one found by the
+`Storage configuration in use` banner rather than by guesswork:
+
+| # | Fault | Symptom it produced |
+| --- | --- | --- |
+| 1 | Tigris key had no list permission | `AccessDenied` on `ListObjectsV2` |
+| 2 | `BACKBLAZE_ENDPOINT` was a pasted markdown link | `TypeError: Invalid URL` |
+| 3 | `BACKBLAZE_BUCKET_NAME` was `"Master Application Key"` | would have been next |
+| 4 | `BACKBLAZE_AWS_SECRET_ACCESS_KEY` unset | `Missing required environment variable` |
+| 5 | Key id was the 12-char account id (B2 master key) | `Malformed Access Key Id` |
+| 6 | — | resolved |
+
+None of these were in the client's code. `storageSweeper.ts` and
+`storageClient.ts` were correct throughout, which is why their logic was never
+changed — only a `dryRun` flag and diagnostics were added.
 
 ---
 
@@ -258,23 +297,42 @@ I need to know which applies before this can be called finished.
 
 Stated plainly so there is no ambiguity later:
 
-- **The authenticated Production deploy.** No access token here — that was the
-  arrangement, and it was the right one. You report the build gates cleared;
-  I have not seen the deploy output, so I am not claiming it.
-- **Whether Trigger.dev Cloud still accepts 3.x deploys server-side.** Cannot be
-  checked without an authenticated deploy. If it ever refuses, that is a v4
-  migration and a separate piece of work.
-- **Deliverable 2 in its entirety — Tigris and Backblaze B2.** No credentials, no
-  buckets, no bytes moved. The only thing established is that
-  `src/utils/storageClient.ts` compiles and bundles. Nothing about hot/cold
-  tiering, streaming, or GPU-node interaction has been exercised. This one needs
-  scoped temporary keys against a throwaway bucket.
+- ~~The authenticated Production deploy.~~ **Now done** — deployed, and both
+  tasks have completed green in Production. I never held a token; every deploy
+  was run by the client, which was the right arrangement.
+- ~~Whether Trigger.dev Cloud still accepts 3.x deploys.~~ **Answered by
+  practice** — it deployed and ran.
+- ~~Deliverable 2 in its entirety.~~ **Now proven** — see §2a. One real object
+  moved Tigris → Backblaze with a size check on arrival.
+- **The sweeper has still only ever moved ONE object, in dry run.** It has never
+  performed a delete against Tigris, and it has never run over more than a single
+  file. The delete path is covered by tests against a real S3 server, not by a
+  live run.
+- **No GPU-node → Tigris write has been observed.** `revenue-gate-router`
+  completes, but whether a ComfyUI render lands in `hot-media-stream` by itself
+  has not been demonstrated end to end — the test object was uploaded by hand.
 - **The validator against a live Dify instance.** Everything in §3 was proved
   against locally signed payloads. Real end-to-end confirmation needs the actual
   webhook secret and one genuine delivery.
 - **Load beyond 2000 concurrent-ish requests on loopback.** `npm run
   test:load:heavy` goes to 20000 at concurrency 256 if you want a bigger number,
   but it is still loopback, not your network path.
+
+## 6. Before you set STORAGE_SWEEP_DRY_RUN=false
+
+Two things worth deciding first, because the flag changes the sweeper from
+harmless to destructive.
+
+**It moves everything, with no age filter.** `sweepStorage` lists the whole hot
+bucket root and migrates every object it finds. There is no "older than N days"
+condition. Once the render pipeline is writing into `hot-media-stream`, the
+Sunday 02:00 UTC run will move files written minutes earlier. If anything serves
+images directly from Tigris, they will stop being there. If you want an age
+threshold or a prefix restriction, that is a small change — say so.
+
+**Your test object is now in both buckets.** The first live run will delete
+`affogato-5ab72bff.jpeg` from Tigris. That is correct behaviour, just worth
+knowing rather than discovering.
 
 ---
 
