@@ -60,7 +60,43 @@ Getting there took six distinct configuration faults, every one found by the
 
 None of these were in the client's code. `storageSweeper.ts` and
 `storageClient.ts` were correct throughout, which is why their logic was never
-changed — only a `dryRun` flag and diagnostics were added.
+changed — only a `dryRun` flag, an age filter and diagnostics were added.
+
+### 2b. The 7-day age filter — added 16 September
+
+The sweeper originally moved **everything** in the hot bucket with no age
+condition. Harmless with one test file; destructive once the render pipeline is
+writing, because the Sunday 02:00 run would move files created minutes earlier
+and anything serving images from Tigris would stop finding them.
+
+Now filters on `LastModified` during the listing, so no extra API calls.
+Default **7 days**, overridable per call (`minAgeDays`) or per environment
+(`STORAGE_SWEEP_MIN_AGE_DAYS`). `0` restores the old behaviour.
+
+Two fail-safe choices, both tested, because this code deletes:
+
+- An object whose `LastModified` cannot be read is **skipped, not swept**.
+  "Don't know how old it is" must mean "don't touch it".
+- An unparseable or negative `STORAGE_SWEEP_MIN_AGE_DAYS` falls back to **7,
+  never 0**. A typo must not silently become "sweep everything now".
+
+Confirmed live in Production:
+
+```
+Nothing eligible: all 1 object(s) in "hot-media-stream" are younger than 7 day(s)
+
+{ "scanned": 1, "skippedTooNew": 1, "migrated": 0, "deleted": 0,
+  "dryRun": true, "minAgeDays": 7, "failed": [] }
+```
+
+That is the filter working, not a failure — and the task says so in those words,
+because a healthy run over fresh renders would otherwise read exactly like a
+broken one.
+
+Tested with 7 new cases against a real S3 server, including a **live, non-dry run
+proving a fresh file is not deleted**. The clock is injected rather than the
+object timestamps faked, so the real server-side `LastModified` is what gets
+compared.
 
 ---
 
@@ -304,10 +340,13 @@ Stated plainly so there is no ambiguity later:
   practice** — it deployed and ran.
 - ~~Deliverable 2 in its entirety.~~ **Now proven** — see §2a. One real object
   moved Tigris → Backblaze with a size check on arrival.
-- **The sweeper has still only ever moved ONE object, in dry run.** It has never
-  performed a delete against Tigris, and it has never run over more than a single
-  file. The delete path is covered by tests against a real S3 server, not by a
-  live run.
+- **The DELETE path has never run in production.** The sweeper has only ever run
+  in dry run against live infrastructure, over a single object. Deletion is
+  covered by tests against a real S3 server — including the case where a failed
+  copy must not delete the source — but the first real delete will happen on the
+  first Sunday after `STORAGE_SWEEP_DRY_RUN=false`, against files that are by
+  then 7 days old.
+- **The sweeper has never run over more than one object at a time.**
 - **No GPU-node → Tigris write has been observed.** `revenue-gate-router`
   completes, but whether a ComfyUI render lands in `hot-media-stream` by itself
   has not been demonstrated end to end — the test object was uploaded by hand.
