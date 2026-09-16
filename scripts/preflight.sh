@@ -106,9 +106,25 @@ fi
 # 5. Config sanity, checked without contacting Trigger.dev.
 #
 #    maxDuration is required by both the 3.3.x and 4.x CLIs; its absence aborts
-#    the deploy. runtime "node-21" is rejected by the 4.x CLI outright, and
-#    "node-22" fails typechecking against the v3 SDK types. "node" is the only
-#    value all three accept.
+#    the deploy.
+#
+#    The legal values for `runtime` depend on the SDK major, so this check reads
+#    SDK_MAJOR from check 3 rather than judging the string on its own. Measured
+#    against the real packages (core 3.3.17 and 4.6.2):
+#
+#      BuildRuntime enum   v3: ["node","bun"]
+#                          v4: ["node","node-22","node-24","node-26","bun"]
+#
+#      generateContainerfile()  v3  "node"     -> FROM node:21-bookworm-slim
+#                                   "node-24"  -> returns undefined, NO Dockerfile
+#                               v4  "node"     -> triggerdotdev/node:21-bookworm
+#                                   "node-24"  -> triggerdotdev/node:24-bookworm
+#
+#    Two traps this encodes:
+#      * the v3 CLI's loadConfig ACCEPTS "node-24" silently -- it only falls over
+#        later, at image generation, with no message naming the runtime;
+#      * on v4, "node" still means Node 21. Upgrading the SDK alone does not get
+#        you off the runtime Trigger.dev retires on 5 October 2026.
 # ---------------------------------------------------------------------------
 if [ -f "trigger.config.ts" ]; then
   if grep -q "maxDuration" trigger.config.ts; then
@@ -119,14 +135,41 @@ if [ -f "trigger.config.ts" ]; then
   fi
 
   RUNTIME=$(grep -o 'runtime:[[:space:]]*"[^"]*"' trigger.config.ts | head -1 | sed 's/.*"\(.*\)"/\1/')
-  case "${RUNTIME:-}" in
-    "")        warn "no explicit runtime set (the CLI will pick its default)" ;;
-    node|bun)  ok "runtime \"$RUNTIME\" is accepted by both CLI majors and the v3 SDK types" ;;
-    node-22|node-24|node-26)
-               warn "runtime \"$RUNTIME\" passes both CLIs but fails tsc against the v3 SDK types"
-               note 'use "node" unless you have already moved to the v4 SDK' ;;
-    *)         bad "runtime \"$RUNTIME\" is not a value the 4.x CLI accepts"
-               note "supported: node, node-22, node-24, node-26, bun" ;;
+  case "${SDK_MAJOR:-}:${RUNTIME:-}" in
+    *:"")
+      warn "no explicit runtime set (the CLI will pick its default)"
+      note 'set one explicitly so a deploy does not depend on the CLI default' ;;
+
+    3:node|3:bun)
+      ok "runtime \"$RUNTIME\" is valid for the v3 SDK you have installed"
+      if [ "$RUNTIME" = "node" ]; then
+        warn "the v3 CLI hard-codes node:21-bookworm-slim -- Trigger.dev retires Node 21 on 5 October 2026"
+        note "there is no v3 config value that changes this; it needs the v4 SDK"
+        note 'migration: @trigger.dev/sdk ^4.0.0  +  runtime: "node-24"'
+      fi ;;
+
+    3:node-22|3:node-24|3:node-26)
+      bad "runtime \"$RUNTIME\" cannot work on the v3 SDK you have installed"
+      note "the v3 CLI only handles \"node\" and \"bun\"; anything else makes it"
+      note "generate NO Dockerfile at all, so the deploy has no image to push."
+      note 'either bump @trigger.dev/sdk to ^4.0.0, or set runtime: "node"' ;;
+
+    4:node)
+      ok "runtime \"node\" is valid for the v4 SDK"
+      warn 'on v4, "node" STILL means Node 21 -- retired 5 October 2026'
+      note 'set runtime: "node-24" to actually move off it' ;;
+
+    4:node-22|4:node-24|4:node-26|4:bun)
+      ok "runtime \"$RUNTIME\" is valid for the v4 SDK you have installed" ;;
+
+    :*)
+      warn "runtime \"$RUNTIME\" not checked -- the installed SDK version could not be read"
+      note "legal values differ by SDK major, so this check needs it" ;;
+
+    *)
+      bad "runtime \"$RUNTIME\" is not a value any supported CLI accepts"
+      note "v3 SDK: node, bun"
+      note "v4 SDK: node, node-22, node-24, node-26, bun" ;;
   esac
 fi
 

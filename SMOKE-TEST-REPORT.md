@@ -303,6 +303,19 @@ You confirmed the format as **lowercase bare hex in `x-dify-signature`**, and no
 Redis idempotency store for now. Both are implemented, as
 `bodyOnly()` and `withTimestampHeader()` in `src/difyPreset.ts`.
 
+**The secret is read as `process.env.DISPATCH_WEBHOOK_SECRET`** (confirmed
+16 September), and a variable of that exact name is set in both the Development
+and Production environments. So the name matches — the remaining question is
+whether the *value* is byte-identical to the signing secret configured on the
+Dify side, which cannot be checked from either end alone. A mismatch there
+presents as every delivery being rejected, not as a crash.
+
+One design note, raised rather than changed: the name suggests this secret may
+also be used for **outbound** dispatch. Sharing one secret between "requests we
+sign" and "requests we verify" is workable but means a rotation has to happen on
+both sides at once, and a leak from either direction compromises both. Separate
+secrets are cheap if you ever want them.
+
 **A bare hex signature carries no timestamp inside it.** If your Dify instance
 does not also send a timestamp header, there is nothing to anchor a freshness
 check to, and the 300-second replay window cannot function. Concretely:
@@ -362,12 +375,14 @@ Stated plainly so there is no ambiguity later:
 Two things worth deciding first, because the flag changes the sweeper from
 harmless to destructive.
 
-**It moves everything, with no age filter.** `sweepStorage` lists the whole hot
-bucket root and migrates every object it finds. There is no "older than N days"
-condition. Once the render pipeline is writing into `hot-media-stream`, the
-Sunday 02:00 UTC run will move files written minutes earlier. If anything serves
-images directly from Tigris, they will stop being there. If you want an age
-threshold or a prefix restriction, that is a small change — say so.
+**It moves everything older than the age threshold, across the whole bucket.**
+`sweepStorage` lists the hot bucket **root** — there is no prefix restriction, so
+every key in the bucket is a candidate. What holds it back is the age filter
+added in §2b: `STORAGE_SWEEP_MIN_AGE_DAYS`, default **7**. Objects younger than
+that are counted in `skippedTooNew` and left alone, so the Sunday 02:00 UTC run
+will not move a render written minutes earlier. Anything older than 7 days that
+is still being served directly from Tigris **will** stop being there. If you want
+a prefix restriction on top of the age filter, that is a small change — say so.
 
 **Your test object is now in both buckets.** The first live run will delete
 `affogato-5ab72bff.jpeg` from Tigris. That is correct behaviour, just worth
@@ -375,7 +390,68 @@ knowing rather than discovering.
 
 ---
 
-## 6. Repositories
+## 7. Dated obligation: Node 21 is retired on 5 October 2026
+
+Not a defect in anything delivered here, but it has a date on it, so it belongs in
+this report rather than in a chat message.
+
+The Trigger.dev dashboard flags `Ava_automation` (`proj_qcyvcbdgcjwitkwvtwij`) as
+running **Node.js v21.7.3**, and states that deployments using Node 21 will fail
+from **5 October 2026**. Deploys continue to work normally until then.
+
+**The dashboard's suggested fix does not work on the installed stack**, which is
+why this is written down. Measured against the real packages, `core` 3.3.17 and
+4.6.2:
+
+| | v3 SDK (3.3.17, installed) | v4 SDK (4.6.2) |
+| --- | --- | --- |
+| `BuildRuntime` enum | `["node","bun"]` | `["node","node-22","node-24","node-26","bun"]` |
+| `runtime: "node"` → base image | `FROM node:21-bookworm-slim` (digest-pinned) | `triggerdotdev/node:21-bookworm` |
+| `runtime: "node-24"` → base image | `generateContainerfile()` returns **`undefined`** — no Dockerfile produced | `triggerdotdev/node:24-bookworm` |
+
+Two traps in that table:
+
+1. **The v3 CLI's `loadConfig` accepts `"node-24"` without complaint.** No error,
+   no warning, the value round-trips intact. It only falls over later at image
+   generation, and nothing in that failure names the runtime. A config that
+   "loads fine" proves nothing here.
+2. **On v4, `runtime: "node"` still means Node 21.** Upgrading the SDK alone does
+   not clear the warning. Both halves are required.
+
+### The migration, as verified
+
+```
+package.json       "@trigger.dev/sdk": "^3.0.0"  →  "^4.0.0"
+trigger.config.ts  runtime: "node"               →  runtime: "node-24"
+deploy             scripts/deploy.sh already reads the installed SDK major and
+                   invokes trigger.dev@<major>, so it switches to the v4 CLI by
+                   itself once package.json is bumped. No edit needed there.
+```
+
+`revenueGateRouter.ts`, `storageSweeper.ts`, `configDoctor.ts`,
+`storageDoctorTask.ts` and every file under `src/utils/` were typechecked against
+SDK **4.6.2** with `runtime: "node-24"`: **`tsc --noEmit` exit 0, zero source
+changes**. The import specifier `@trigger.dev/sdk/v3` still resolves under v4 —
+it is retained as an export alias — so even the import lines stay as they are.
+
+**What that does not prove:** a clean typecheck establishes that the types line
+up, not that the runtime behaves identically. Two runs settle it after the
+upgrade — one `revenue-gate-router` (which exercises `wait.for` and the
+`AbortTaskRunError` path) and one `weekly-storage-sweeper`.
+
+`scripts/preflight.sh` now reads the installed SDK major and checks `runtime`
+against it, so it fails loudly on a v3-SDK-plus-`node-24` combination instead of
+letting it reach a deploy, and warns on either flavour of "still on Node 21".
+
+### Suggested sequencing
+
+Node 21 keeps deploying until 5 October. Doing a major version bump immediately
+before a launch is an avoidable risk, and doing it after the deadline means being
+unable to ship a fix. The window between those two is the place for it.
+
+---
+
+## 8. Repositories
 
 | | |
 | --- | --- |
